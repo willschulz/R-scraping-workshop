@@ -1,1 +1,3 @@
-# R-scraping-workshop
+# R scraping workshop
+
+These are materials used in an R scraping workshop on January 28th, 2021.  The markdown file contains code for basic Twitter scraping, news article scraping, and a worked example of parsing content from the US Department of Labor personnel page, including an overview of automated scraping using crontab on mac, and historical scraping using the Internet Archive.  Since IA scraping code is likely to break (changes to the page in question require changes to the parsing code), this repo also includes a data file to illustrate the kind of data that can be gathered from IA using code similar to that included in the markdown file.
