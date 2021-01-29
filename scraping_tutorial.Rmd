@@ -1,0 +1,460 @@
+---
+title: "Scraping Tutorial"
+author: "Will Schulz"
+date: "1/28/2021"
+output: html_document
+---
+
+```{r}
+#run this first to install needed packages
+install.packages(c("tidyverse", "rtweet", "rvest", "lubridate", "boilerpipeR", "RCurl"))
+
+```
+
+```{r}
+library(tidyverse)
+library(rtweet)
+library(rvest)
+library(lubridate)
+library(boilerpipeR)
+library(RCurl)
+```
+
+# Scraping Tweets
+
+The code chunks below have everything you need to scrape the most recent 3200 tweets from a given set of users.  You'll need to make your own token(s) though.  Start by applying for a developer account (https://developer.twitter.com/en/apply-for-access).
+
+NOTE: Twitter is rolling out a Version 2 of its API. This means that R packages like rtweet may be updated to take advantage of some new features of the API.  Hopefully these updates won't break existing functionality, but this is something to be mindful of if you're using this code in the future.
+
+BUT MORE IMPORTANTLY, AS OF THIS WEEK, TWITTER HAS ANNOUNCED NEW ACCESS PRIVILEGES FOR ACADEMICS: https://blog.twitter.com/developer/en_us/topics/tips/2021/enabling-the-future-of-academic-research-with-the-twitter-api.html
+
+This will make it much easier to get larger amounts of data.  This is so new that I do not yet know how it works, but if you need a large amount of Twitter data (millions of tweets, thousands of users, or old tweets) this is likely your best option.  Feel free to reach out to me in the future, I will be learning about these new features soon and should be able to advise you.
+
+However, rtweet is pretty easy to use, and if you only need a moderate volume of tweets, probably still your best option.  To get started, you create a token object using the codes you get when you create your tokens in the Twitter Developer interface.  To save you the trouble, I've entered my own token information (which I'll be regenerating after today's workshop, so be advised that this token info won't work in the future, just for today).
+
+```{r}
+require(rtweet)
+
+#make a token object to use when pulling data
+my_twitter_token <- create_token(consumer_key = "gx70tATYg5fjieSqqMdsUN5Eg",
+                                 consumer_secret = "8A7mrcIcBWQ8Xs2aaubKy9aGDakg6GTlo0y0ql92X3iBr61pD9",
+                                 access_token = "1350118402287935489-pP2QK1psGpzmUiXqryiTDyfLhFF4NC",
+                                 access_secret = "ScmRxYeNE4rVjknMP0TQeOhhW7hWEL1OdIj1qWtKCq5lq")
+```
+
+Now we can get tweets and follow networks using the following functions from the rtweet package:
+
+```{r}
+# Skills session participants: don't run this chunk until I've run it - I'll explain why
+
+#get tweets:
+timeline_data <- get_timelines(user = c("SecretaryPerry", "GovernorPerry"), #can also use userIDs
+                               n = 3200, #you can't go back further than the last 3200 tweets
+                               token = my_twitter_token) #token created above
+
+#get who they follow
+friends_data <- get_friends(users = c("SecretaryPerry", "GovernorPerry"),
+                            token = my_twitter_token)
+
+#get who followers them
+followers_data <- get_followers(user = "GovernorPerry", #get_followers() can only do one user at a time
+                                token = my_twitter_token)
+```
+
+It's good to visualize the data you've scraped, to get a sense of the time period your data covers.  This is especially useful when you're scraping a lot of tweets from a lot of users, since visualization will make clear if you're missing tweets from certain users, or if there's weird bot-like tweeting patterns.
+
+```{r}
+require(tidyverse)
+timeline_data_to_plot <- timeline_data %>%
+  mutate(user_index = case_when(screen_name == "SecretaryPerry" ~ 1,
+                                screen_name == "GovernorPerry" ~ 2))
+
+par(bty="n", xpd=TRUE)
+plot(timeline_data_to_plot$created_at, timeline_data_to_plot$user_index, pch=16, col = rgb(0,0,0,.02), yaxt="n", ylab="", ylim = c(0,5))
+text(x = max(timeline_data_to_plot$created_at), y=c(1,2), labels = c("SecretaryPerry", "GovernorPerry"), pos = 3)
+```
+
+
+# Scraping a News Article and Extracting Body Text
+
+Scraping news articles is relatively easy, since you can pull out the body text of an article using the boilerpipeR package.  This is great, since the most annoying part of scraping is parsing the scraped page into a useful format.  If what you want is the body text of a news article, boilerpipeR does this for you.  Iterate this code over many news articles and, badabing badaboom, you'll have a nice big corpus to do fun text analysis stuff with.  Just remember to use Sys.sleep() to pause between scraping the same site to avoid getting blocked.  See line 383 for an example of this.
+
+```{r}
+require(tidyverse)
+require(RCurl)
+require(boilerpipeR)
+
+news_url <- "https://www.huffpost.com/entry/rick-perry-dancing-with-the-stars_n_57c4ef71e4b0cdfc5ac8fdca"
+
+news_html <- RCurl::getURL(news_url) #download html using the RCurl function getURL(). This is the only time we'll use RCurl in this tutorial, and the reason is that the output works well as an input to boilerpipeR functions.
+article_text <- boilerpipeR::ArticleExtractor(news_html)
+article_text
+article_text %>% str_split(pattern = "\n") %>% unlist
+```
+
+
+# Scraping Website Tables: US Dept. of Labor Personnel
+
+What if we want to scrape something more complicated than a news article?  For example, we might want to scrape the personnel page of the US Department of Labor: https://www.dol.gov/general/contact/contact-phonekeypersonnel.
+
+This page contains information about who holds certain positions in different departments, which positions are left vacant, and which positions are filled with an "acting" official.  The page is organized in a systematic way: individuals are listed in HTML tables, organized under headings that denote departments.  We will take advantage of this structure to extract this information into a dataframe that we can analyze in R.
+
+First we will read the raw HTML, and turn these HTML table rows into rows of a dataframe.
+
+```{r}
+require(tidyverse)
+require(rvest)
+
+personnel_html <- read_html("https://www.dol.gov/general/contact/contact-phonekeypersonnel") #download html
+
+personnel_df <- personnel_html %>%
+  html_nodes("tr") %>% #identify all table rows
+  html_text() %>% #get text from table rows
+  str_split(pattern = "\n\t\t\t", simplify = F) %>% #split rows into title, name, and phone number
+  do.call(rbind, .) %>% #bind list into array
+  data.frame(stringsAsFactors = F) #make array into dataframe
+
+colnames(personnel_df) <- c("title", "name", "phone") #name columns appropriately
+
+personnel_df$phone <- personnel_df$phone %>% str_remove_all(pattern = "\n|\t") #clean up garbage
+```
+
+Now, getting the departments is trickier, since they are given as headings, rather than a table column.  But we can easily get these headings using a similar method.
+
+```{r}
+personnel_df <- personnel_df %>% mutate(department = NA) #make a new variable
+departments <- personnel_html %>% html_nodes("h3") %>% html_text() #get the department names
+#but then how do we assign the right department to the right people?
+```
+
+Now we must associate the individual personnel with their correct department.  To do this, we will teach R to do what we would do to identify a given person's department: look for the nearest department heading above that person's name.
+
+In order to do this, we'll need to grab all the relevant page content - the table rows as well as the headings - in the order they appear on the page.  This will be our reference for "what's the first heading above X individual's name?"
+
+```{r}
+# we need the full context of the page
+everything <- personnel_html %>%
+  html_nodes("#block-opa-theme-content") %>% #identify all content in container matching this ID
+  html_text() %>% #pull text of that block
+  str_split("\n") %>% #split it by line breaks
+  do.call(c, .) %>% #bind into a vector
+  str_remove_all(pattern = "\n|\t") #clean out garbage
+```
+
+Then we write some functions that are highly particular to this task.  If we were only going to scrape this page once, this might be too much work - we could just copy and paste the information into a spreadsheet.  But as we'll see below, we'll be able to use this same code to repeat this process many times, and accumulate a larger dataset.
+
+```{r}
+# Make some useful functions, which we will run on every row of the dataframe momentarily
+
+#this function returns the indices of a character vector that match a given pattern
+indexer <- function(x, y){
+  which(str_detect(string = x, pattern = y))
+}
+
+row <- 1 # use row 1 to demonstrate how the function works
+
+#this function finds the right "department" heading for each person, based on their name, title, and phone number (we need all three because of duplicates, if they were unique we could use the function at the end of this chunk)
+findDepartment <- function(row){
+  name_index <- indexer(everything, personnel_df$name[row]) # where does this name appear?
+  title_index <- indexer(everything, personnel_df$title[row]) # where does this title appear?
+  phone_index <- indexer(everything, personnel_df$phone[row]) # where does this phone number appear?
+  match1 <- which(name_index %in% (title_index+1)) # which names come right after these titles?
+  match2 <- which(name_index %in% (phone_index-1)) # which names come right before these phone numbers?
+  row_index <- name_index[match1[which(match1 %in% match2)]] # which names satisfy BOTH criteria? what's the index for that name?
+  department_index <- everything[1:row_index] %in% departments %>% #get all rows above the specified index
+    which %>% #get their indices
+    max #get the maximum index
+  return(everything[department_index]) #return the last department heading name that appears before our chosen table row
+}
+
+# This would be a lot easier if the names (or titles or phone numbers) were unique.
+# Unfortunately some names are listed as "Vacant," and titles and phone numbers aren't unique either.
+# If names were unique, we could use the function below instead:
+# 
+# findDepartment <- function(row){
+#   name_index <- indexer(everything, personnel_df$name[row])
+#   department_index <- everything[1:name_index] %in% departments %>% #get all rows above the name
+#     which %>% #get their indices
+#     max #get the maximum index
+#   return(everything[department_index]) #return the last department heading name
+# }
+```
+
+Now we'll use this function to fill in the department for every row of our dataframe.
+
+```{r}
+#find departments for each row of our dataframe
+for (i in 1:nrow(personnel_df)) {
+  personnel_df$department[i] <- findDepartment(i)
+}
+personnel_df
+```
+
+Now we can make some summary statistics by department: what proportion of positions in each department are "acting" and "vacant"?
+
+```{r}
+#make summary statistics by department
+personnel_df_summary <- personnel_df %>%
+  group_by(department) %>%
+  summarise(acting=mean(str_detect(string = title, pattern = "Acting")),
+            vacant=mean(str_detect(string = name, pattern = "Vacant")))
+```
+
+And we can plot our new data!
+
+```{r fig.height=4, fig.width=5}
+par(mfrow=c(2,1))
+
+barplot(personnel_df_summary$acting,
+        names.arg = personnel_df_summary$department %>% str_remove(".*\\(") %>% str_remove("\\)"),
+        cex.names = .75, las = 2, main = "Proportion Acting")
+
+barplot(personnel_df_summary$vacant,
+        names.arg = personnel_df_summary$department %>% str_remove(".*\\(") %>% str_remove("\\)"),
+        cex.names = .75, las = 2, main = "Proportion Vacant", ylim=c(0,1))
+```
+
+## Automatic Scraping Every Day
+
+Put a folder in your home directory called "autoscrape", and put an empty "data" folder inside it, alongside the following code saved as a .R script called "autoscrape_script.R":
+
+```{r eval=F}
+setwd("~/autoscrape")
+options(tidyverse.quiet = TRUE)
+require(rvest)
+require(tidyverse)
+
+message("Scraping personnel for date: ", Sys.Date())
+
+indexer <- function(x, y){which(str_detect(string = x, pattern = y))}
+
+findDepartment <- function(row){
+  name_index <- indexer(everything, personnel_df$name[row]) # where does this name appear?
+  title_index <- indexer(everything, personnel_df$title[row]) # where does this title appear?
+  phone_index <- indexer(everything, personnel_df$phone[row]) # where does this phone number appear?
+  match1 <- which(name_index %in% (title_index+1)) # which names come right after these titles?
+  match2 <- which(name_index %in% (phone_index-1)) # which names come right before these phone numbers?
+  row_index <- name_index[match1[which(match1 %in% match2)]] # which names satisfy BOTH criteria? what's the index for that name?
+  department_index <- everything[1:row_index] %in% departments %>% #get all rows above the specified index
+    which %>% #get their indices
+    max #get the maximum index
+  return(everything[department_index]) #return the last department heading name that appears before our chosen table row
+}
+
+message("Scraping page html...")
+
+personnel_html <- read_html("https://www.dol.gov/general/contact/contact-phonekeypersonnel") #download html
+
+message("Parsing page content...")
+
+personnel_df <- personnel_html %>%
+  html_nodes("tr") %>% #identify all table rows
+  html_text() %>% #get text from table rows
+  str_split(pattern = "\n\t\t\t", simplify = F) %>% #split rows into title, name, and phone number
+  do.call(rbind, .) %>% #bind list into array
+  data.frame(stringsAsFactors = F) #make array into dataframe
+
+colnames(personnel_df) <- c("title", "name", "phone") #name columns appropriately
+
+personnel_df$phone <- personnel_df$phone %>% str_remove_all(pattern = "\n|\t") #clean up garbage
+
+message("Finding departments...")
+
+personnel_df <- personnel_df %>% mutate(department = NA) #make a new variable
+departments <- personnel_html %>% html_nodes("h3") %>% html_text() #get the department names
+
+everything <- personnel_html %>%
+  html_nodes("#block-opa-theme-content") %>% #identify all content in container matching this ID
+  html_text() %>% #pull text of that block
+  str_split("\n") %>% #split it by line breaks
+  do.call(c, .) %>% #bind into a vector
+  str_remove_all(pattern = "\n|\t") #clean out garbage
+
+for (i in 1:nrow(personnel_df)) {
+  personnel_df$department[i] <- findDepartment(i)
+}
+
+save_name <- paste0("personnel_", Sys.Date(), ".rds")
+
+message("Saving data file as: ", save_name)
+
+saveRDS(personnel_df, file = paste0("~/autoscrape/data/", save_name))
+
+message("Scraping completed!")
+```
+
+Enter the following line of code into your terminal (or run this chunk) to locate your R installation:
+
+```{bash}
+which Rscript
+```
+
+On my computer, this is "/usr/local/bin/Rscript", so below I've pasted this location, and the location of the script we want to run, into the line below.  Try running this chunk - it should scrape the page and save the resulting data in your "data" folder.
+
+```{bash}
+/usr/local/bin/Rscript ~/autoscrape/autoscrape_script.R
+```
+
+You can automatically scrape every day using your computer's "crontab".  The crontab allows you to run scripts on a schedule. See https://ole.michelsen.dk/blog/schedule-jobs-with-crontab-on-mac-osx/ for instructions for editing the crontab on mac.  You'll need to fiddle with it a bit if you're unfamiliar with using your terminal, but your resulting crontab will look something like this:
+
+```{bash}
+MAILTO="your-email-address" # this will email the logged output of your scraping code to you, so you can see at a glance whether your code is working or if you're getting errors
+00 12 * * * /usr/local/bin/Rscript ~/autoscrape/autoscrape_script.R >> ~/autoscrape/logs/scrapeLog.txt
+#m  h d m d                                                          # make a "logs" directory to save logs
+```
+
+If this is properly set up, then you will scrape the page every day, so long as your computer is turned on and awake when the script is scheduled to run (you can schedule automatic wake-up time in your system preferences, to take the worry out of this.  Schedule wake-up for a couple of minutes before your script is scheduled to fire.)
+
+By running this every day, you can accumulate a longitudinal dataset for as long as you keep scraping.
+
+## Time Travel
+
+But what if we want a longitudinal dataset and we aren't willing to wait for it?  Travel back in time, of course!
+
+We will use the Internet Archive: https://web.archive.org/
+
+```{r}
+require(rvest)
+require(tidyverse)
+require(lubridate)
+
+#paste our page of interest into a web archive query:
+personnel_url <- "www.dol.gov/general/contact/contact-phonekeypersonnel"
+url <- str_c("http://web.archive.org/cdx/search/cdx?url=", personnel_url)
+
+#pull down the set of available scrapes maintained in the Wayback Machine, and clean up:
+try(ia <- read_lines(url), silent = TRUE) #download the file corresponding to the URL
+ia_records_array <- t(sapply(1:length(ia), function(x) str_split(ia[x], " ")[[1]][2:4]))
+colnames(ia_records_array) <- c("timestamp", "url", "type") #name columns  
+
+# clean up some more:
+ia_records <- ia_records_array %>%
+  data.frame(., stringsAsFactors = F) %>% #pull out date identifiers for each capture
+  mutate(datetime = as_datetime(ymd_hms(timestamp))) %>% #parse timestamp strings into date objects
+  filter(type=="text/html")
+
+ia_records
+nrow(ia_records)
+```
+
+Unfortunately the page was changed at one point, meaning we need to write slightly different parsing functions:
+
+```{r}
+indexer2 <- function(x, y){
+  which(str_detect(string = x, pattern = y) | x==y)
+}
+
+findDepartment2 <- function(row){
+  everything <- everything[which(! everything %in% c(""," ","  ","   ","    "))]
+  name_index <- indexer2(everything, personnel_df$name[row]) # where does this name appear?
+  title_index <- indexer2(everything, personnel_df$title[row]) # where does this title appear?
+  phone_index <- indexer2(everything, personnel_df$phone[row]) # where does this phone number appear?
+  match1 <- which(name_index %in% (title_index+1)) # which names come right after these titles?
+  match2 <- which(name_index %in% (phone_index-1)) # which names come right before these phone numbers?
+  row_index <- name_index[match1[which(match1 %in% match2)]] # which names satisfy BOTH criteria? what's the index for that name?
+  department_index <- everything[1:row_index] %in% departments %>% #get all rows above the specified index
+    which %>% #get their indices
+    max #get the maximum index
+  return(everything[department_index]) #return the last department heading name that appears before our chosen table row
+}
+```
+
+Now we loop through the available Wayback Machine scrapes, scrape them ourselves, parse them, and save them.  Here I've filtered out the older captures, since otherwise we'd need to write even more functions to make this work for those captures (because the format of the page was changed several times).
+
+```{r}
+ia_records_filtered <- ia_records %>% filter(datetime >= "2019-01-26 03:53:11 UTC")
+```
+
+```{r}
+#now we do this over and over again in a loop
+require(rvest)
+require(tidyverse)
+require(lubridate)
+
+if (! dir.exists("data")){dir.create("data")} # make a folder to save scrapes into
+
+personnel_df_list <- list()
+failed_index <- c()
+
+pb <- txtProgressBar(min = 1, max = nrow(ia_records_filtered), style = 3) #progress bars are good for mental health
+
+for (i in 1:nrow(ia_records_filtered)) {
+  setTxtProgressBar(pb, i)
+  Sys.sleep(10) #sleeping is VERY IMPORTANT! If you do not sleep the site may think you are attacking it.
+  #NA all key variables to prevent one error from affecting subsequent loops
+  page_URL <- NA
+  personnel_html <- NA
+  personnel_df <- NA
+  departments <- NA
+  everything <- NA
+  page_URL <- str_c("https://web.archive.org/web/", ia_records_filtered$timestamp[i], "/", ia_records_filtered$url[i]) #create page url
+  personnel_html <- try(read_html(page_URL)) #this is where we actually scrape the page. Wrap the request in "try()" to avoid a single error stopping your scraping loop.  You can go back and inspect errors later, but you don't want your loop to stop every time sand gets in the gears.  The internet has a lot of sand!
+  if(class(personnel_html)=="try-error") {
+    failed_index <- c(failed_index,i) #record the row of ia_records that failed to scrape, so you can go back and try again later.
+    next #and since we didn't get any data, no need to attempt parsing, so skip to next row of ia_records
+  }
+  #if we did get data, now let's parse it into a useful dataframe!
+  personnel_df <- personnel_html %>%
+    html_nodes("tr") %>% #identify all table rows
+    html_text() %>% #get text from table rows
+    str_split(pattern = "\n\t\t\t", simplify = F) %>% #split rows into title, name, and phone number
+    do.call(rbind, .) %>% #bind list into array
+    data.frame(stringsAsFactors = F) %>% #make array into dataframe
+    transmute(title=str_remove_all(X1, pattern = "\n|\t"), name=str_remove_all(X2, pattern = "\n|\t"), phone=str_remove_all(X3, pattern = "\n|\t")) #name variables and clean out garbage
+  
+  departments <- personnel_html %>% html_nodes("h3") %>% html_text() #get the department names
+  
+  everything <- personnel_html %>%
+    html_nodes("#block-opa-theme-content") %>% #identify all content in container matching this ID
+    html_text() %>% #pull text of that block
+    str_split("\n") %>% #split it by line breaks
+    do.call(c, .) %>% #bind into a vector
+    str_remove_all(pattern = "\n|\t") #clean out garbage
+  
+  personnel_df$department <- NA
+  
+  for (j in 1:nrow(personnel_df)) {
+    try(personnel_df$department[j] <- findDepartment2(j))
+  }
+  
+  personnel_df <- personnel_df %>% mutate(vacant=str_detect(name, "(?i)vacant"), #(?i) makes this case-insensitive
+                                          acting=str_detect(title, "(?i)acting"),
+                                          date=ia_records_filtered$date[i])
+  personnel_df_list[[i]] <- personnel_df
+  saveRDS(personnel_df, file = paste0("data/personnel_",ia_records_filtered$timestamp[i],".rds"))
+}
+
+#saveRDS(personnel_df_list, file = "data/personnel_df_list_all.rds")
+```
+
+Now, since this is finnicky and takes awhile, I've got the results pre-prepared from when I ran this a couple of weeks ago.  I haven't sent this file, so the 2 chunks below won't work for you, but this should illustrate the value of scraping back in time using the Internet Archive!
+
+```{r}
+personnel_df_list <- readRDS(file="personnel_df_list_all.rds")
+
+summary_list <- list()
+
+for (i in 1:length(personnel_df_list)) {
+  if(ncol(personnel_df_list[[i]])!=7){next} #if we don't have a date column, skip to next
+  summary_list[[i]] <- personnel_df_list[[i]] %>% summarise(vacancy=mean(vacant),
+                                                            actingness=mean(acting),
+                                                            date=date[1])
+}
+
+summary_df <- do.call(rbind, summary_list) %>% arrange(date)
+```
+
+```{r fig.height=7}
+par(mfrow=c(2,1))
+plot(summary_df$date, summary_df$vacancy, type = "l", ylim = c(0,1), main = "Vacancy")
+plot(summary_df$date, summary_df$actingness, type = "l", ylim = c(0,1), main = "Actingness")
+```
+
+
+
+# Selenium: Browser Automation and Screenshots
+
+Sometimes you need to automate certain browser actions (click a button, scroll down a page) in order to scrape what you need.  For this, you need Selenium.  Selenium lets you "remote control" your browser (chrome, firefox, etc) to perform these actions.  It also allows you to take screenshots of a page, which you can't do without a browser to render the page in question.
+
+I have decided that selenium is beyond the scope of what we can cover in this skills session, in part because using it requires some set-up outside of Rstudio (you can't just install the package and it works).  Selenium is also one of the few things I'd recommend using in Python rather than R.  This is partly because the online documentation is better for the Python implementation than the R one, so it's easier to troubleshoot the inevitable errors if you're doing it in Python, since the google results will mostly pertain to Python.
+
